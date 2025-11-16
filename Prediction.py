@@ -17,14 +17,16 @@ test_data=[10930,10318,10595,10972,7706,6756,9092,10551,9722,10913,11151,8186,64
 logger = logging.getLogger("Predictor")
 # 预测类
 class predictor:
-    def __init__(self, look_back=15, n_models=20, n_estimators=100, learning_rate = 0.05):
+    def __init__(self, look_back=30, n_models=20, n_estimators=100, learning_rate = 0.05):
         '''
         :param look_back: 将之前的多少个时间点作为特征
         :param n_estimators: 多少个树
         :param learning_rate: 学习率
         '''
         self.look_back=look_back
+        # 模型数量
         self.n_models = n_models
+        # 基础参数
         self.n_estimators = n_estimators
         self.lr = learning_rate
         self.models = []
@@ -50,6 +52,7 @@ class predictor:
                 label = data[i]
                 X.append(features)
                 y.append(label)
+            logger.info("Finished dataset prepare. ")
         await loop.run_in_executor(None,sync_dataset_prepare)
         # 整数型
         int_data_X = numpy.array(X)
@@ -67,7 +70,7 @@ class predictor:
         # 同步训练函数
         def train_sync():
             for i in range(self.n_models):
-                # 随机模型
+                # 各种模型，避免出现退化现象
                 model = LGBMRegressor(
                     n_estimators=self.n_estimators+i*10,
                     learning_rate=self.lr+0.001*i,
@@ -77,6 +80,7 @@ class predictor:
                 indices = numpy.random.choice(len(self.data_X), len(self.data_X), replace=True)
                 model.fit(self.data_X[indices],self.data_y[indices])
                 self.models.append(model)
+                logger.info(f"Trained model: {i+1}/{self.n_models}")
         await loop.run_in_executor(None,train_sync)
         logger.info("model trained successfully!")
     # 预测函数
