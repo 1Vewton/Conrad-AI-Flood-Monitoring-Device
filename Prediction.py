@@ -1,4 +1,3 @@
-import numpy as np
 import lightgbm
 import numpy
 import logging
@@ -6,6 +5,7 @@ import asyncio
 import random
 import pandas as pd
 import matplotlib.pyplot as plt
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 # 测试数据
 # 具有上升趋势和波动的测试数据
@@ -20,32 +20,28 @@ test_data = [10930,10318,10595,10972,7706,6756,9092,10551,9722,10913,11151,8186,
 
 def generate_trendy_data():
     # 基础上升趋势
-    trend = np.linspace(1000, 2500, 300)
+    trend = numpy.linspace(1000, 2500, 300)
     # 添加波动
     # 添加噪声
-    noise = np.random.normal(0, 50, 300)
+    noise = numpy.random.normal(0, 50, 300)
     data = trend + noise
     return data
 # 初始化
 logger = logging.getLogger("Predictor")
 # 处理数据集
-def create_features(window, full_series, position):
+def create_features(window, full_series):
     # 特征
     features = []
     # 滞后特征
-    features.extend(window)
+    features.extend([window[0],
+                     window[int(len(window)/2)],
+                     window[len(window)-1]])
     # 统计特征
     features.extend([
         # 平均
         numpy.mean(window),
         # 标准差
         numpy.std(window),
-        # 最小值
-        numpy.min(window),
-        # 最大值
-        numpy.max(window),
-        # 中位数
-        numpy.median(window),
         # 变化量
         window[-1] - window[0]
     ])
@@ -59,14 +55,30 @@ def create_features(window, full_series, position):
             # 变化稳定性
             numpy.std(diff_features)
         ])
-        features.extend(diff_features)
     # 趋势特征
     if len(window)>=3:
-        x = np.arange(len(window))
+        x = numpy.arange(len(window))
         # 斜率
-        slope = np.polyfit(x, window, 1)[0]
+        slope = numpy.polyfit(x, window, 1)[0]
         features.append(slope)
     # 全局趋势特征
+    if len(window)<=len(full_series):
+        long_mean = numpy.mean(full_series)
+        short_mean = numpy.mean(window)
+        features.extend([
+            # 绝对差异
+            short_mean - long_mean,
+            # 相对比例
+            short_mean/(long_mean+1e-8)
+        ])
+        # 全局线性趋势
+        global_x = numpy.arange(len(full_series))
+        global_slope = numpy.polyfit(global_x, full_series, 1)[0]
+        features.append(global_slope)
+    # 动量特征
+    if len(window) >= 4:
+        momentum = window[-1]-2*window[-2]+window[-3]
+        features.append(momentum)
     return features
 # 预测类
 class predictor:
@@ -83,15 +95,22 @@ class predictor:
         self.n_estimators = n_estimators
         self.lr = learning_rate
         self.models = []
+        # 模型分数
+        self.models_score = []
+        # 模型权重
+        self.models_weight = []
         # 数据集
         self.raw_data = None
         # 训练数据
         self.data_X=None
         self.data_y=None
+        # 测试数据
+        self.test_X = None
+        self.test_y = None
     # 数据集构建
-    async def prepare_dataset(self,data,split_proportion=0.2):
+    async def prepare_dataset(self,data, split_proportion=0.2):
         loop = asyncio.get_event_loop()
-        self.raw_data = numpy.array(data).astype(numpy.float64)
+        self.raw_data = data
         # 空列表，准备存放我们需要的数据集
         X, y=[],[]
         # 如果数据量不够
@@ -100,19 +119,43 @@ class predictor:
         def sync_dataset_prepare():
             for i in range(self.look_back,len(data)):
                 # 特征
-                features = create_features(data[i-self.look_back:i])
+                features = create_features(data[i-self.look_back:i], data)
                 # 标签，即当前值
                 label = data[i]
                 X.append(features)
                 y.append(label)
             logger.info("Finished dataset prepare. ")
+            # 整数型
+            int_data_X = numpy.array(X)
+            int_data_y = numpy.array(y)
+            # 打乱
+            rand_idx = numpy.arange(len(int_data_y))
+            numpy.random.shuffle(rand_idx)
+            int_data_y = int_data_y[rand_idx]
+            int_data_X = int_data_X[rand_idx]
+            # 分割数据集
+            test_data_prop = int(len(int_data_y)*split_proportion)
+            test_data_y = int_data_y[:test_data_prop-1]
+            train_data_y = int_data_y[test_data_prop:]
+            test_data_X = int_data_X[:test_data_prop-1]
+            train_data_X = int_data_X[test_data_prop:]
+            # 强转为float64
+            self.data_X = train_data_X.astype(numpy.float64)
+            self.data_y = train_data_y.astype(numpy.float64)
+            self.test_X = test_data_X.astype(numpy.float64)
+            self.test_y = test_data_y.astype(numpy.float64)
         await loop.run_in_executor(None,sync_dataset_prepare)
-        # 整数型
-        int_data_X = numpy.array(X)
-        int_data_y = numpy.array(y)
-        # 强转为float64
-        self.data_X = int_data_X.astype(np.float64)
-        self.data_y = int_data_y.astype(np.float64)
+    # 获取模型权重
+    def get_model_weights(self):
+        # 使用MSE的倒数作为权重基础
+        mse_scores = [score['mse'] for score in self.models_score]
+        min_mse = numpy.min(mse_scores)
+        if min_mse == 0.0:
+            min_mse = 1e-8
+        # softmax-like
+        quality_scores = [min_mse/(score['mse']+1e-8) for score in self.models_score]
+        exp_scores = numpy.exp(quality_scores-numpy.max(quality_scores))
+        self.models_weight = exp_scores/numpy.sum(exp_scores)
     # 训练函数
     async def train(self):
         '''
@@ -121,37 +164,65 @@ class predictor:
         '''
         loop = asyncio.get_event_loop()
         # 同步训练函数
-        def train_sync():
-            for i in range(self.n_models):
-                params = {
-                    "objective": "regression",
-                    "n_estimators":self.n_estimators + i * 10,
-                    "learning_rate": self.lr + 0.001 * i,
-                    "random_state": 42 + i,
-                    "verbose":1
-                }
-                # 各种模型，避免出现退化现象
-                indices = numpy.random.choice(len(self.data_X), len(self.data_X), replace=True)
-                train_dataset = lightgbm.Dataset(data=self.data_X[indices],label=self.data_y[indices])
-                model = lightgbm.train(params=params, train_set=train_dataset)
-                self.models.append(model)
-                logger.info(f"Trained model: {i+1}/{self.n_models}")
-        await loop.run_in_executor(None,train_sync)
+        def train_sync(i:int):
+            # 测试集
+            test_dataset = lightgbm.Dataset(data=self.test_X, label=self.test_y)
+            # 训练集
+            indices = numpy.random.choice(len(self.data_X), len(self.data_X), replace=True)
+            train_dataset = lightgbm.Dataset(data=self.data_X[indices], label=self.data_y[indices])
+            # 模型参数
+            params = {
+                "objective": "regression",
+                "n_estimators": self.n_estimators + i * 10,
+                "metric": "l2",
+                "num_leaves": 31 + (i % 5) * 5,
+                "learning_rate": self.lr + 0.001 * i,
+                "random_state": 42 + i,
+                "verbose": 1
+            }
+            # 各种模型，避免出现退化现象
+            model = lightgbm.train(params=params, train_set=train_dataset, valid_sets=[test_dataset])
+            self.models.append({"model":model,
+                                "idx":i})
+            logger.info(f"Trained model: {i + 1}/{self.n_models}")
+            # 评估模型
+            test_result = model.predict(self.test_X)
+            mse = mean_squared_error(self.test_y, test_result)
+            mae = mean_absolute_error(self.test_y, test_result)
+            # 模型分数
+            score = {
+                'mse': mse,
+                'mae': mae,
+                'rmse': numpy.sqrt(mse),
+                'model_idx': i
+            }
+            self.models_score.append(score)
+        # 异步处理
+        async def train_async(i:int):
+            await loop.run_in_executor(None,train_sync,i)
+        tasks = []
+        for i in range(self.n_models):
+            tasks.append(asyncio.create_task(train_async(i)))
+        await asyncio.wait(tasks)
         logger.info("model trained successfully!")
+        self.get_model_weights()
     # 预测函数
     async def predict(self, data, total_future_count):
         loop = asyncio.get_event_loop()
         # 同步预测函数
         def sync_prediction():
             current_window = self.raw_data[-self.look_back:].copy()
-            feature_window = numpy.array(create_features(current_window))
+            feature_window = numpy.array(create_features(current_window, self.raw_data))
             predictions = []
             for _ in range(total_future_count):
                 # 预测下一个点
-                next_prediction = random.choice(self.models).predict(feature_window.reshape(1, -1))[0]
+                next_prediction = self.models[16].predict(feature_window.reshape(1, -1))[0]
                 predictions.append(next_prediction)
                 # 上一个点出队，预测点入队
+                print(current_window)
+                print(feature_window)
                 current_window = numpy.append(current_window[1:], next_prediction)
+                feature_window = numpy.array(create_features(current_window, self.raw_data))
             return predictions
         # 准备数据集
         await self.prepare_dataset(data)
@@ -163,7 +234,10 @@ class predictor:
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     pred = predictor()
-    res = loop.run_until_complete(pred.predict(test_data,120))
+    res = loop.run_until_complete(pred.prepare_dataset(test_data))
+    loop.run_until_complete(pred.train())
+    print(pred.models_weight)
     print(len(test_data))
     plt.plot(numpy.append(numpy.array(test_data),res))
     plt.show()
+    print(test_data)
