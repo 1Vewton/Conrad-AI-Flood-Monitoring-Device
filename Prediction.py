@@ -94,9 +94,9 @@ class predictor:
         # 基础参数
         self.n_estimators = n_estimators
         self.lr = learning_rate
-        self.models = []
+        self.models = [None]*self.n_models
         # 模型分数
-        self.models_score = []
+        self.models_score = [None]*self.n_models
         # 模型权重
         self.models_weight = []
         # 数据集
@@ -178,12 +178,11 @@ class predictor:
                 "num_leaves": 31 + (i % 5) * 5,
                 "learning_rate": self.lr + 0.001 * i,
                 "random_state": 42 + i,
-                "verbose": 1
+                "verbose": -1
             }
             # 各种模型，避免出现退化现象
             model = lightgbm.train(params=params, train_set=train_dataset, valid_sets=[test_dataset])
-            self.models.append({"model":model,
-                                "idx":i})
+            self.models[i] = model
             logger.info(f"Trained model: {i + 1}/{self.n_models}")
             # 评估模型
             test_result = model.predict(self.test_X)
@@ -196,7 +195,7 @@ class predictor:
                 'rmse': numpy.sqrt(mse),
                 'model_idx': i
             }
-            self.models_score.append(score)
+            self.models_score[i] = score
         # 异步处理
         async def train_async(i:int):
             await loop.run_in_executor(None,train_sync,i)
@@ -206,37 +205,48 @@ class predictor:
         await asyncio.wait(tasks)
         logger.info("model trained successfully!")
         self.get_model_weights()
-    # 预测函数
-    async def predict(self, data, total_future_count):
-        loop = asyncio.get_event_loop()
-        # 同步预测函数
-        def sync_prediction():
-            current_window = self.raw_data[-self.look_back:].copy()
+    # 单个模型预测
+    def ensemble_predict(self, total_future_count, midx:int):
+        # 结果的prediction
+        predictions = []
+        current_window = self.raw_data[-self.look_back:].copy()
+        feature_window = numpy.array(create_features(current_window, self.raw_data))
+        for i in range(total_future_count):
+            # 预测下一个点
+            next_prediction = self.models[midx].predict(feature_window.reshape(1, -1))[0]
+            predictions.append(next_prediction)
+            # 上一个点出队，预测点入队
+            current_window = numpy.append(current_window[1:], next_prediction)
             feature_window = numpy.array(create_features(current_window, self.raw_data))
-            predictions = []
-            for _ in range(total_future_count):
-                # 预测下一个点
-                next_prediction = self.models[16].predict(feature_window.reshape(1, -1))[0]
-                predictions.append(next_prediction)
-                # 上一个点出队，预测点入队
-                print(current_window)
-                print(feature_window)
-                current_window = numpy.append(current_window[1:], next_prediction)
-                feature_window = numpy.array(create_features(current_window, self.raw_data))
-            return predictions
+        return numpy.array(predictions)*self.models_weight[midx]
+    # 预测函数
+    async def predict(self, data, total_future_count:int):
+        loop = asyncio.get_event_loop()
+        # 预测
+        self.predictions = numpy.zeros(total_future_count)
+        # 同步预测函数
+        def predict_sync(i:int):
+            return self.ensemble_predict(total_future_count, i)
+        # 异步预测函数
+        async def predict_async(i:int):
+            res = await loop.run_in_executor(None, predict_sync, i)
+            self.predictions = self.predictions+res
         # 准备数据集
         await self.prepare_dataset(data)
         # 训练
         await self.train()
-        # 预测
-        predictions = await loop.run_in_executor(None, sync_prediction)
-        return predictions
+        # 异步预测
+        tasks = []
+        for i in range(self.n_models):
+            tasks.append(asyncio.create_task(predict_async(i)))
+        await asyncio.wait(tasks)
+        return self.predictions
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     pred = predictor()
-    res = loop.run_until_complete(pred.prepare_dataset(test_data))
+    res = loop.run_until_complete(pred.predict(test_data, 120))
     loop.run_until_complete(pred.train())
-    print(pred.models_weight)
+    print(res)
     print(len(test_data))
     plt.plot(numpy.append(numpy.array(test_data),res))
     plt.show()
