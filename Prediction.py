@@ -20,10 +20,10 @@ test_data = [10930,10318,10595,10972,7706,6756,9092,10551,9722,10913,11151,8186,
 
 def generate_trendy_data():
     # 基础上升趋势
-    trend = numpy.linspace(1000, 2500, 300)
+    trend = numpy.array([50.0]*300)
     # 添加波动
     # 添加噪声
-    noise = numpy.random.normal(0, 50, 300)
+    noise = numpy.random.normal(0, 1, 300)
     data = trend + noise
     return data
 # 初始化
@@ -244,6 +244,7 @@ class predictor:
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     pred = predictor()
+    test_data = generate_trendy_data()
     res = loop.run_until_complete(pred.predict(test_data, 120))
     loop.run_until_complete(pred.train())
     print(res)
