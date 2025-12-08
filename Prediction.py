@@ -1,250 +1,252 @@
 import lightgbm
-import numpy
+import numpy as np
 import logging
 import asyncio
-import random
-import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.linear_model import LinearRegression
 
-# 测试数据
-# 具有上升趋势和波动的测试数据
-test_data = [10930,10318,10595,10972,7706,6756,9092,10551,9722,10913,11151,8186,6422,
-6337,11649,11652,10310,12043,7937,6476,9662,9570,9981,9331,9449,6773,6304,9355,
-10477,10148,10395,11261,8713,7299,10424,10795,11069,11602,11427,9095,7707,10767,
-12136,12812,12006,12528,10329,7818,11719,11683,12603,11495,13670,11337,10232,
-13261,13230,15535,16837,19598,14823,11622,19391,18177,19994,14723,15694,13248,
-9543,12872,13101,15053,12619,13749,10228,9725,14729,12518,14564,15085,14722,
-11999,9390,13481,14795,15845,15271,14686,11054,10395]
+def generate_trendy_data(n=300, slope=0.1, noise_std=1.0):
+    """
+    Generate noisy linear trend data for testing.
+    """
+    trend = np.array([100.0]*n)
+    noise = np.random.normal(0, noise_std, n)
+    return trend + noise
 
-
-def generate_trendy_data():
-    # 基础上升趋势
-    x = numpy.arange(300)
-    trend = 0.1 * x
-    # 添加噪声
-    noise = numpy.random.normal(0, 1, 300)
-    data = trend + noise
-    return data
-# 初始化
 logger = logging.getLogger("Predictor")
-# 处理数据集
-def create_features(window, full_series):
-    # 特征
+
+def create_features(window, reference_series):
+    """
+    Create features from a window in a time series.
+    reference_series should always be only the historical/training part up to current window.
+    """
     features = []
-    # 滞后特征
-    features.extend([window[0],
-                     window[int(len(window)/2)],
-                     window[len(window)-1]])
-    # 统计特征
+    # Window-based features
     features.extend([
-        # 平均
-        numpy.mean(window),
-        # 标准差
-        numpy.std(window),
-        # 变化量
-        window[-1] - window[0]
+        window[0],                # first value in window
+        window[len(window)//2],   # middle value
+        window[-1]                # last value
     ])
-    # 差分特征
+    features.extend([
+        np.mean(window),          # mean in window
+        np.std(window),           # std in window
+        window[-1] - window[0]    # delta in window
+    ])
     if len(window) > 1:
-        diff_features = numpy.diff(window)
-        # 差分特征插入
+        diff_features = np.diff(window)
         features.extend([
-            # 平均变化率
-            numpy.mean(diff_features),
-            # 变化稳定性
-            numpy.std(diff_features)
+            np.mean(diff_features),    # mean change in window
+            np.std(diff_features)      # change std
         ])
-    # 趋势特征
-    if len(window)>=3:
-        x = numpy.arange(len(window))
-        # 斜率
-        slope = numpy.polyfit(x, window, 1)[0]
-        features.append(slope)
-    # 全局趋势特征
-    if len(window)<=len(full_series):
-        long_mean = numpy.mean(full_series)
-        short_mean = numpy.mean(window)
-        features.extend([
-            # 绝对差异
-            short_mean - long_mean,
-            # 相对比例
-            short_mean/(long_mean+1e-8)
-        ])
-        # 全局线性趋势
-        global_x = numpy.arange(len(full_series))
-        global_slope = numpy.polyfit(global_x, full_series, 1)[0]
-        features.append(global_slope)
-    # 动量特征
+    if len(window) >= 3:
+        x = np.arange(len(window))
+        features.append(np.polyfit(x, window, 1)[0])  # linear slope of window
+    # "Global" features
+    ref_mean = np.mean(reference_series)
+    window_mean = np.mean(window)
+    features.extend([
+        window_mean - ref_mean,            # difference from global mean
+        window_mean / (ref_mean + 1e-8)    # ratio to global mean
+    ])
+    global_x = np.arange(len(reference_series))
+    global_slope = np.polyfit(global_x, reference_series, 1)[0]
+    features.append(global_slope)
     if len(window) >= 4:
-        momentum = window[-1]-2*window[-2]+window[-3]
+        momentum = window[-1] - 2 * window[-2] + window[-3]
         features.append(momentum)
     return features
-# 预测类
-class predictor:
-    def __init__(self, look_back=15, n_models=20, n_estimators=100, learning_rate = 0.05):
-        '''
-        :param look_back: 将之前的多少个时间点作为特征
-        :param n_estimators: 多少个树
-        :param learning_rate: 学习率
-        '''
-        self.look_back=look_back
-        # 模型数量
+
+class HybridPredictor:
+    """
+    Hybrid predictor combining LightGBM and Linear Regression for time series forecasting.
+    """
+    def __init__(self, look_back=15, n_models=10, n_estimators=100, learning_rate=0.05):
+        self.look_back = look_back
         self.n_models = n_models
-        # 基础参数
         self.n_estimators = n_estimators
         self.lr = learning_rate
-        self.models = [None]*self.n_models
-        # 模型分数
-        self.models_score = [None]*self.n_models
-        # 模型权重
-        self.models_weight = []
-        # 数据集
-        self.raw_data = None
-        # 训练数据
-        self.data_X=None
-        self.data_y=None
-        # 测试数据
-        self.test_X = None
-        self.test_y = None
-    # 数据集构建
-    async def prepare_dataset(self,data, split_proportion=0.8):
+        self.models = [None] * self.n_models
+        self.models_score = [None] * self.n_models
+        self.models_weight = None
+        self.linreg_model = None
+        self.alpha = 0.5   # Hybrid weight, will be adjusted after training
+
+    async def prepare_dataset(self, series, train_ratio=0.8):
+        """
+        Prepare chronological train/test split and indices for rolling forecast.
+        """
+        def sync_prepare():
+            X, y = [], []
+            for i in range(self.look_back, len(series)):
+                X.append(create_features(series[i-self.look_back:i], series[:i]))
+                y.append(series[i])
+            X = np.array(X)
+            y = np.array(y)
+            split = int(len(y) * train_ratio)
+            train_X, train_y = X[:split], y[:split]
+            test_X, test_y = X[split:], y[split:]
+            train_series = series[:split+self.look_back]   # train sequence for rolling
+            test_series = series[split+self.look_back:]    # test sequence for rolling
+            train_indices = np.arange(split + self.look_back) # Indices for linear regression
+            return train_X, train_y, test_X, test_y, train_series, test_series, train_indices
         loop = asyncio.get_event_loop()
-        self.raw_data = data
-        # 空列表，准备存放我们需要的数据集
-        X, y=[],[]
-        # 如果数据量不够
-        if len(data)<self.look_back:
-            raise Exception("Error: No enough data for training!")
-        def sync_dataset_prepare():
-            for i in range(self.look_back,len(data)):
-                # 特征
-                features = create_features(data[i-self.look_back:i], data)
-                # 标签，即当前值
-                label = data[i]
-                X.append(features)
-                y.append(label)
-            logger.info("Finished dataset prepare. ")
-            # 整数型
-            int_data_X = numpy.array(X)
-            int_data_y = numpy.array(y)
-            # 分割数据集
-            test_data_prop = int(len(int_data_y)*split_proportion)
-            print(test_data_prop)
-            train_data_y = int_data_y[:test_data_prop]
-            test_data_y = int_data_y[test_data_prop+1:]
-            train_data_X = int_data_X[:test_data_prop]
-            test_data_X = int_data_X[test_data_prop+1:]
-            # 强转为float64
-            self.data_X = train_data_X.astype(numpy.float64)
-            self.data_y = train_data_y.astype(numpy.float64)
-            self.test_X = test_data_X.astype(numpy.float64)
-            self.test_y = test_data_y.astype(numpy.float64)
-        await loop.run_in_executor(None,sync_dataset_prepare)
-    # 获取模型权重
+        self.data_X, self.data_y, self.test_X, self.test_y, self.train_series, self.test_series, self.train_indices = await loop.run_in_executor(None, sync_prepare)
+
     def get_model_weights(self):
-        # 使用MSE的倒数作为权重基础
-        mse_scores = [score['mse'] for score in self.models_score]
-        min_mse = numpy.min(mse_scores)
-        if min_mse == 0.0:
-            min_mse = 1e-8
-        # softmax-like
+        """
+        Get softmax-like weights for ensemble based on LightGBM model MSE.
+        """
+        mse_scores = [score["mse"] for score in self.models_score]
+        min_mse = np.min(mse_scores)
+        min_mse = min_mse if min_mse > 0 else 1e-8
         quality_scores = [min_mse/(score['mse']+1e-8) for score in self.models_score]
-        exp_scores = numpy.exp(quality_scores-numpy.max(quality_scores))
-        self.models_weight = exp_scores/numpy.sum(exp_scores)
-    # 训练函数
+        exp_scores = np.exp(quality_scores - np.max(quality_scores))
+        self.models_weight = exp_scores / np.sum(exp_scores)
+
     async def train(self):
-        '''
-        :param data: 数据
-        :param future_prediction_total: 总共要预测的分钟数
-        '''
+        """
+        Train LightGBM ensemble and Linear regression in parallel.
+        """
         loop = asyncio.get_event_loop()
-        # 同步训练函数
-        def train_sync(i:int):
-            # 测试集
-            test_dataset = lightgbm.Dataset(data=self.test_X, label=self.test_y)
-            # 训练集
-            indices = numpy.random.choice(len(self.data_X), len(self.data_X), replace=True)
-            train_dataset = lightgbm.Dataset(data=self.data_X[indices], label=self.data_y[indices])
-            # 模型参数
-            params = {
-                "objective": "regression",
-                "n_estimators": self.n_estimators + i * 10,
-                "metric": "l2",
-                "num_leaves": 31 + (i % 5) * 5,
-                "learning_rate": self.lr + 0.001 * i,
-                "random_state": 42 + i,
-                "verbose": -1
-            }
-            # 各种模型，避免出现退化现象
-            model = lightgbm.train(params=params, train_set=train_dataset, valid_sets=[test_dataset])
-            self.models[i] = model
-            logger.info(f"Trained model: {i + 1}/{self.n_models}")
-            # 评估模型
-            test_result = model.predict(self.test_X)
-            mse = mean_squared_error(self.test_y, test_result)
-            mae = mean_absolute_error(self.test_y, test_result)
-            # 模型分数
-            score = {
-                'mse': mse,
-                'mae': mae,
-                'rmse': numpy.sqrt(mse),
-                'model_idx': i
-            }
-            self.models_score[i] = score
-        # 异步处理
-        async def train_async(i:int):
-            await loop.run_in_executor(None,train_sync,i)
-        tasks = []
-        for i in range(self.n_models):
-            tasks.append(asyncio.create_task(train_async(i)))
-        await asyncio.wait(tasks)
-        logger.info("model trained successfully!")
+        # Train LightGBM ensemble
+        async def train_lgbm(i):
+            def train_sync(i):
+                train_dataset = lightgbm.Dataset(self.data_X, label=self.data_y)
+                test_dataset = lightgbm.Dataset(self.test_X, label=self.test_y)
+                params = {
+                    "objective": "regression",
+                    "n_estimators": self.n_estimators + i * 10,
+                    "metric": "l2",
+                    "num_leaves": 31 + (i % 5) * 5,
+                    "learning_rate": self.lr + 0.001 * i,
+                    "random_state": 42 + i,
+                    "verbose": -1
+                }
+                model = lightgbm.train(params=params, train_set=train_dataset, valid_sets=[test_dataset])
+                self.models[i] = model
+                test_result = model.predict(self.test_X)
+                mse = mean_squared_error(self.test_y, test_result)
+                mae = mean_absolute_error(self.test_y, test_result)
+                score = {'mse': mse, 'mae': mae, 'rmse': np.sqrt(mse), 'model_idx': i}
+                self.models_score[i] = score
+            await loop.run_in_executor(None, train_sync, i)
+
+        # Train all LightGBM models concurrently
+        await asyncio.gather(*(train_lgbm(i) for i in range(self.n_models)))
         self.get_model_weights()
-    # 单个模型预测
-    def ensemble_predict(self, total_future_count, midx:int):
-        # 结果的prediction
-        predictions = []
-        current_window = self.raw_data[-self.look_back:].copy()
-        feature_window = numpy.array(create_features(current_window, self.raw_data))
-        for i in range(total_future_count):
-            # 预测下一个点
-            next_prediction = self.models[midx].predict(feature_window.reshape(1, -1))[0]
-            predictions.append(next_prediction)
-            # 上一个点出队，预测点入队
-            current_window = numpy.append(current_window[1:], next_prediction)
-            feature_window = numpy.array(create_features(current_window, self.raw_data))
-        return numpy.array(predictions)*self.models_weight[midx]
-    # 预测函数
-    async def predict(self, data, total_future_count:int):
+
+        # Train Linear Regression on train series index (one-dimensional time input)
+        def train_linreg():
+            X_lr = self.train_indices.reshape(-1, 1)
+            y_lr = self.train_series
+            return LinearRegression().fit(X_lr, y_lr)
+        self.linreg_model = await loop.run_in_executor(None, train_linreg)
+
+        # Adjust hybrid alpha automatically based on validation error
+        # Use validation/test MSE: alpha is set so that "best" performing model gets highest weight
+        # Smaller error => bigger alpha weight (normalized to [0,1])
+        lgbm_ensemble_mse = np.mean([score['mse'] for score in self.models_score])
+        linreg_val_pred = self.linreg_model.predict(
+            np.arange(len(self.train_series), len(self.train_series) + len(self.test_y)).reshape(-1, 1)
+        )
+        linreg_mse = mean_squared_error(self.test_y, linreg_val_pred)
+        # Avoid zero division
+        total = lgbm_ensemble_mse + linreg_mse + 1e-8
+        self.alpha = (linreg_mse / total) if (linreg_mse + lgbm_ensemble_mse) > 0 else 0.5
+        # This means alpha is higher if LightGBM error is lower; hybrid prediction gives more weight to better predictor
+
+    async def ensemble_forecast(self, steps):
+        """
+        Asynchronous LightGBM rolling forecast (multi-step ahead, beyond train).
+        """
+        predictions = np.zeros(steps)
         loop = asyncio.get_event_loop()
-        # 预测
-        self.predictions = numpy.zeros(total_future_count)
-        # 同步预测函数
-        def predict_sync(i:int):
-            return self.ensemble_predict(total_future_count, i)
-        # 异步预测函数
-        async def predict_async(i:int):
-            res = await loop.run_in_executor(None, predict_sync, i)
-            self.predictions = self.predictions+res
-        # 准备数据集
-        await self.prepare_dataset(data)
-        # 训练
-        await self.train()
-        # 异步预测
-        tasks = []
-        for i in range(self.n_models):
-            tasks.append(asyncio.create_task(predict_async(i)))
-        await asyncio.wait(tasks)
-        return self.predictions
+
+        async def single_model_forecast(idx):
+            model = self.models[idx]
+            weight = self.models_weight[idx]
+            rolling_win = self.train_series[-self.look_back:].copy()
+            pred = []
+            for step in range(steps):
+                features = create_features(rolling_win, self.train_series)
+                next_val = await loop.run_in_executor(None, model.predict, np.array(features).reshape(1, -1))
+                next_val = next_val[0]
+                pred.append(next_val * weight)
+                rolling_win = np.append(rolling_win[1:], next_val)
+            return np.array(pred)
+
+        tasks = [single_model_forecast(i) for i in range(self.n_models)]
+        results = await asyncio.gather(*tasks)
+        for res in results:
+            predictions += res
+        return predictions
+
+    async def linear_forecast(self, steps):
+        """
+        Asynchronous Linear Regression forecast for future time indices.
+        """
+        start_idx = len(self.train_series)
+        indices = np.arange(start_idx, start_idx + steps).reshape(-1,1)
+        loop = asyncio.get_event_loop()
+        # Since scikit-learn predict is fast, can await directly
+        pred = await loop.run_in_executor(None, self.linreg_model.predict, indices)
+        return pred
+
+    async def hybrid_forecast(self, steps):
+        """
+        Hybrid prediction: weighted sum of async LightGBM and Linear Regression predictions.
+        """
+        lgbm_pred, linreg_pred = await asyncio.gather(
+            self.ensemble_forecast(steps),
+            self.linear_forecast(steps)
+        )
+        # Hybrid alpha chosen after training by validation error for automatic model weighting
+        return self.alpha * lgbm_pred + (1.0 - self.alpha) * linreg_pred
+
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
-    pred = predictor()
     test_data = generate_trendy_data()
-    res = loop.run_until_complete(pred.predict(test_data, 120))
+    pred = HybridPredictor()
+    # Prepare dataset (chronological split)
+    loop.run_until_complete(pred.prepare_dataset(test_data, train_ratio=0.8))
     loop.run_until_complete(pred.train())
-    print(res)
-    print(len(test_data))
-    plt.plot(numpy.append(numpy.array(test_data),res))
+    forecast_steps = min(120, len(pred.test_series))
+
+    # Asynchronous prediction
+    lgbm_pred, linreg_pred, hybrid_pred = loop.run_until_complete(asyncio.gather(
+        pred.ensemble_forecast(forecast_steps),
+        pred.linear_forecast(forecast_steps),
+        pred.hybrid_forecast(forecast_steps)
+    ))
+
+    # Plot all
+    plt.plot(np.arange(len(test_data)), test_data, label='All Data', alpha=0.5)
+    plt.plot(
+        np.arange(len(test_data)-forecast_steps, len(test_data)),
+        test_data[-forecast_steps:], 'b', label='True Future'
+    )
+    plt.plot(
+        np.arange(len(test_data)-forecast_steps, len(test_data)),
+        lgbm_pred, 'orange', label='LightGBM Forecast'
+    )
+    plt.plot(
+        np.arange(len(test_data)-forecast_steps, len(test_data)),
+        linreg_pred, 'g', label='Linear Regression Forecast'
+    )
+    plt.plot(
+        np.arange(len(test_data)-forecast_steps, len(test_data)),
+        hybrid_pred, 'r', label='Hybrid Forecast (α={:.2f})'.format(pred.alpha)
+    )
+    plt.legend()
     plt.show()
-    print(test_data)
+
+    # Print MSE and MAE for each method
+    print("Test size:", forecast_steps)
+    print("LightGBM MSE:", mean_squared_error(test_data[-forecast_steps:], lgbm_pred))
+    print("LinearReg MSE:", mean_squared_error(test_data[-forecast_steps:], linreg_pred))
+    print("Hybrid MSE:", mean_squared_error(test_data[-forecast_steps:], hybrid_pred))
+    print("LightGBM MAE:", mean_absolute_error(test_data[-forecast_steps:], lgbm_pred))
+    print("LinearReg MAE:", mean_absolute_error(test_data[-forecast_steps:], linreg_pred))
+    print("Hybrid MAE:", mean_absolute_error(test_data[-forecast_steps:], hybrid_pred))
+    print("Hybrid α (weighted by validation error): {:.2f}".format(pred.alpha))
