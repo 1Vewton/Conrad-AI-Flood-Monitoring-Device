@@ -108,7 +108,7 @@ class predictor:
         self.test_X = None
         self.test_y = None
     # 数据集构建
-    async def prepare_dataset(self,data, split_proportion=0.2):
+    async def prepare_dataset(self,data, split_proportion=0.8):
         loop = asyncio.get_event_loop()
         self.raw_data = data
         # 空列表，准备存放我们需要的数据集
@@ -130,10 +130,11 @@ class predictor:
             int_data_y = numpy.array(y)
             # 分割数据集
             test_data_prop = int(len(int_data_y)*split_proportion)
-            test_data_y = int_data_y[:test_data_prop-1]
-            train_data_y = int_data_y[test_data_prop:]
-            test_data_X = int_data_X[:test_data_prop-1]
-            train_data_X = int_data_X[test_data_prop:]
+            print(test_data_prop)
+            train_data_y = int_data_y[:test_data_prop]
+            test_data_y = int_data_y[test_data_prop+1:]
+            train_data_X = int_data_X[:test_data_prop]
+            test_data_X = int_data_X[test_data_prop+1:]
             # 强转为float64
             self.data_X = train_data_X.astype(numpy.float64)
             self.data_y = train_data_y.astype(numpy.float64)
