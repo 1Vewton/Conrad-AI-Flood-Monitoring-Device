@@ -20,8 +20,8 @@ test_data = [10930,10318,10595,10972,7706,6756,9092,10551,9722,10913,11151,8186,
 
 def generate_trendy_data():
     # 基础上升趋势
-    trend = numpy.array([50.0]*300)
-    # 添加波动
+    x = numpy.arange(300)
+    trend = 0.1 * x
     # 添加噪声
     noise = numpy.random.normal(0, 1, 300)
     data = trend + noise
@@ -128,11 +128,6 @@ class predictor:
             # 整数型
             int_data_X = numpy.array(X)
             int_data_y = numpy.array(y)
-            # 打乱
-            rand_idx = numpy.arange(len(int_data_y))
-            numpy.random.shuffle(rand_idx)
-            int_data_y = int_data_y[rand_idx]
-            int_data_X = int_data_X[rand_idx]
             # 分割数据集
             test_data_prop = int(len(int_data_y)*split_proportion)
             test_data_y = int_data_y[:test_data_prop-1]
