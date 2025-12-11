@@ -5,8 +5,10 @@ import asyncio
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.linear_model import LinearRegression
+import time
+import tracemalloc
 
-def generate_trendy_data(n=300, slope=0.1, noise_std=1.0):
+def generate_trendy_data(n=10080, slope=0.1, noise_std=1.0):
     """
     Generate noisy linear trend data for testing.
     """
@@ -205,20 +207,32 @@ class HybridPredictor:
         return self.alpha * lgbm_pred + (1.0 - self.alpha) * linreg_pred
 
 if __name__ == "__main__":
+    tracemalloc.start()
     loop = asyncio.get_event_loop()
     test_data = generate_trendy_data()
     pred = HybridPredictor()
     # Prepare dataset (chronological split)
+    start = time.time()
+    # Start memory monitoring
+    startmem = tracemalloc.take_snapshot()
     loop.run_until_complete(pred.prepare_dataset(test_data, train_ratio=0.8))
     loop.run_until_complete(pred.train())
     forecast_steps = min(120, len(pred.test_series))
-
+    hybrid_pred = loop.run_until_complete(pred.hybrid_forecast(forecast_steps))
+    current, peak = tracemalloc.get_traced_memory()
+    print(f"Current memory usage is {current / 10 ** 6}MB; Peak was {peak / 10 ** 6}MB")
+    endmem = tracemalloc.take_snapshot()
+    top_stats = endmem.compare_to(startmem, 'lineno')
+    for stats in top_stats:
+        print(stats)
+    end = time.time()
+    print(f"Execution time: {end-start}")
     # Asynchronous prediction
-    lgbm_pred, linreg_pred, hybrid_pred = loop.run_until_complete(asyncio.gather(
+    lgbm_pred, linreg_pred = loop.run_until_complete(asyncio.gather(
         pred.ensemble_forecast(forecast_steps),
         pred.linear_forecast(forecast_steps),
-        pred.hybrid_forecast(forecast_steps)
     ))
+
 
     # Plot all
     plt.plot(np.arange(len(test_data)), test_data, label='All Data', alpha=0.5)
