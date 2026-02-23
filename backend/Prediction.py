@@ -210,6 +210,7 @@ if __name__ == "__main__":
     tracemalloc.start()
     loop = asyncio.get_event_loop()
     test_data = generate_trendy_data()
+    print(test_data)
     pred = HybridPredictor()
     # Prepare dataset (chronological split)
     start = time.time()
