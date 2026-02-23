@@ -144,6 +144,23 @@ The code can be extended by:
 - Adding confidence intervals to predictions
 - Supporting exogenous variables
 
+## Server
+
+### Environment Setting
+
+Run the following command to set up the environment: 
+```commandline
+pip install -r requirements.txt
+```
+
+### Run Server
+
+You can run the following command to start the program: 
+```commandline
+python -m Server
+```
+After that, visit http://localhost:8080/docs to see the api document. 
+
 # License
 
 This implementation is provided for educational and research purposes. Modify and distribute as needed with appropriate attribution.
