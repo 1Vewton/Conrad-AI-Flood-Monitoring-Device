@@ -7,7 +7,9 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.linear_model import LinearRegression
 import time
 import tracemalloc
+import logging
 
+logger = logging.getLogger("Predictor")
 def generate_trendy_data(n=10080, slope=0.1, noise_std=1.0):
     """
     Generate noisy linear trend data for testing.
@@ -159,6 +161,7 @@ class HybridPredictor:
         # This means alpha is higher if LightGBM error is lower; hybrid prediction gives more weight to better predictor
 
     async def ensemble_forecast(self, steps):
+        logger.info("Start LightGBM ensemble prediction")
         """
         Asynchronous LightGBM rolling forecast (multi-step ahead, beyond train).
         """
@@ -188,6 +191,7 @@ class HybridPredictor:
         """
         Asynchronous Linear Regression forecast for future time indices.
         """
+        logger.info("Start linear regression forecast")
         start_idx = len(self.train_series)
         indices = np.arange(start_idx, start_idx + steps).reshape(-1,1)
         loop = asyncio.get_event_loop()
@@ -209,7 +213,14 @@ class HybridPredictor:
 if __name__ == "__main__":
     tracemalloc.start()
     loop = asyncio.get_event_loop()
-    test_data = generate_trendy_data()
+    test_data1 = generate_trendy_data()
+    test_data = np.array([10930,10318,10595,10972,7706,6756,9092,10551,9722,10913,11151,8186,6422,
+6337,11649,11652,10310,12043,7937,6476,9662,9570,9981,9331,9449,6773,6304,9355,
+10477,10148,10395,11261,8713,7299,10424,10795,11069,11602,11427,9095,7707,10767,
+12136,12812,12006,12528,10329,7818,11719,11683,12603,11495,13670,11337,10232,
+13261,13230,15535,16837,19598,14823,11622,19391,18177,19994,14723,15694,13248,
+9543,12872,13101,15053,12619,13749,10228,9725,14729,12518,14564,15085,14722,
+11999,9390,13481,14795,15845,15271,14686,11054,10395])
     print(test_data)
     pred = HybridPredictor()
     # Prepare dataset (chronological split)
